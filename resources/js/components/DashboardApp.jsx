@@ -1,49 +1,132 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 export default function DashboardApp() {
     const [loading, setLoading] = useState(true);
     const [pedidos, setPedidos] = useState([]);
     const [filtro, setFiltro] = useState('por-enviar');
+    const [page, setPage] = useState(1);
     const [resumen, setResumen] = useState({});
     const [meta, setMeta] = useState({});
     const [links, setLinks] = useState({ prev: null, next: null });
+    const [error, setError] = useState(null);
 
-    const fetchPedidos = async (estado = 'por-enviar', page = 1) => {
-        setLoading(true);
-
-        const response = await fetch(`/dashboard/data?estado=${estado}&page=${page}`, {
-            headers: {
-                Accept: 'application/json',
-            },
-            credentials: 'same-origin',
-        });
-
-        const result = await response.json();
-
-        setPedidos(result.data);
-        setFiltro(result.filtro);
-        setResumen(result.resumen);
-        setMeta(result.meta);
-        setLinks(result.links);
-        setLoading(false);
-    };
+    // cache en memoria por combinación filtro|page
+    const cacheRef = useRef(new Map());
 
     useEffect(() => {
+        const controller = new AbortController();
+        const cacheKey = `${filtro}|${page}`;
+
+        const fetchPedidos = async () => {
+            setError(null);
+
+            // si ya existe en cache, úsalo y evita request
+            if (cacheRef.current.has(cacheKey)) {
+                const cached = cacheRef.current.get(cacheKey);
+                setPedidos(cached.data);
+                setResumen(cached.resumen);
+                setMeta(cached.meta);
+                setLinks(cached.links);
+                setLoading(false);
+                return;
+            }
+
+            try {
+                setLoading(true);
+
+                const response = await fetch(
+                    `/dashboard/data?estado=${encodeURIComponent(filtro)}&page=${page}`,
+                    {
+                        headers: {
+                            Accept: 'application/json',
+                        },
+                        credentials: 'same-origin',
+                        signal: controller.signal,
+                    }
+                );
+
+                if (!response.ok) {
+                    throw new Error(`Error HTTP ${response.status}`);
+                }
+
+                const result = await response.json();
+
+                const payload = {
+                    data: result.data ?? [],
+                    resumen: result.resumen ?? {},
+                    meta: result.meta ?? {},
+                    links: result.links ?? { prev: null, next: null },
+                };
+
+                cacheRef.current.set(cacheKey, payload);
+
+                setPedidos(payload.data);
+                setResumen(payload.resumen);
+                setMeta(payload.meta);
+                setLinks(payload.links);
+
+                // Prefetch opcional de la siguiente página
+                const nextPage = (payload.meta.current_page ?? page) + 1;
+                const lastPage = payload.meta.last_page ?? page;
+
+                if (nextPage <= lastPage) {
+                    const nextKey = `${filtro}|${nextPage}`;
+
+                    if (!cacheRef.current.has(nextKey)) {
+                        fetch(
+                            `/dashboard/data?estado=${encodeURIComponent(filtro)}&page=${nextPage}`,
+                            {
+                                headers: {
+                                    Accept: 'application/json',
+                                },
+                                credentials: 'same-origin',
+                            }
+                        )
+                            .then((r) => (r.ok ? r.json() : null))
+                            .then((nextResult) => {
+                                if (!nextResult) return;
+
+                                cacheRef.current.set(nextKey, {
+                                    data: nextResult.data ?? [],
+                                    resumen: nextResult.resumen ?? {},
+                                    meta: nextResult.meta ?? {},
+                                    links: nextResult.links ?? { prev: null, next: null },
+                                });
+                            })
+                            .catch(() => {
+                                // ignorar errores del prefetch
+                            });
+                    }
+                }
+            } catch (err) {
+                if (err.name === 'AbortError') return;
+                setError('No se pudieron cargar los pedidos.');
+            } finally {
+                setLoading(false);
+            }
+        };
+
         fetchPedidos();
-    }, []);
+
+        return () => controller.abort();
+    }, [filtro, page]);
 
     const cambiarFiltro = (nuevoFiltro) => {
-        fetchPedidos(nuevoFiltro, 1);
+        if (nuevoFiltro === filtro) return;
+        setFiltro(nuevoFiltro);
+        setPage(1);
     };
 
-    const cambiarPaginaDesdeUrl = (url) => {
-        if (!url) return;
+    const irPaginaAnterior = () => {
+        if (meta.current_page > 1) {
+            setPage(meta.current_page - 1);
+        }
+    };
 
-        const parsed = new URL(url);
-        const page = parsed.searchParams.get('page') || 1;
-        const estado = parsed.searchParams.get('estado') || filtro;
-
-        fetchPedidos(estado, page);
+    const irPaginaSiguiente = () => {
+        if (meta.current_page < meta.last_page) {
+            setPage(meta.current_page + 1);
+        }
     };
 
     const badgeClass = (estado) => {
@@ -65,22 +148,34 @@ export default function DashboardApp() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-                <button onClick={() => cambiarFiltro('por-enviar')} className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'por-enviar' ? 'border-blue-500' : 'border-transparent'}`}>
+                <button
+                    onClick={() => cambiarFiltro('por-enviar')}
+                    className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'por-enviar' ? 'border-blue-500' : 'border-transparent'}`}
+                >
                     <div className="text-sm text-gray-500">Por Enviar</div>
                     <div className="text-2xl font-bold text-blue-600">{resumen.por_enviar ?? 0}</div>
                 </button>
 
-                <button onClick={() => cambiarFiltro('retrasados')} className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'retrasados' ? 'border-red-500' : 'border-transparent'}`}>
+                <button
+                    onClick={() => cambiarFiltro('retrasados')}
+                    className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'retrasados' ? 'border-red-500' : 'border-transparent'}`}
+                >
                     <div className="text-sm text-gray-500">Retrasados</div>
                     <div className="text-2xl font-bold text-red-600">{resumen.retrasados ?? 0}</div>
                 </button>
 
-                <button onClick={() => cambiarFiltro('entregados')} className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'entregados' ? 'border-green-500' : 'border-transparent'}`}>
+                <button
+                    onClick={() => cambiarFiltro('entregados')}
+                    className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'entregados' ? 'border-green-500' : 'border-transparent'}`}
+                >
                     <div className="text-sm text-gray-500">Entregados</div>
                     <div className="text-2xl font-bold text-green-600">{resumen.entregados ?? 0}</div>
                 </button>
 
-                <button onClick={() => cambiarFiltro('cancelados')} className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'cancelados' ? 'border-gray-500' : 'border-transparent'}`}>
+                <button
+                    onClick={() => cambiarFiltro('cancelados')}
+                    className={`bg-white rounded-xl shadow p-4 border text-left ${filtro === 'cancelados' ? 'border-gray-500' : 'border-transparent'}`}
+                >
                     <div className="text-sm text-gray-500">Cancelados</div>
                     <div className="text-2xl font-bold text-gray-700">{resumen.cancelados ?? 0}</div>
                 </button>
@@ -89,6 +184,8 @@ export default function DashboardApp() {
             <div className="bg-white rounded-xl shadow overflow-hidden">
                 {loading ? (
                     <div className="p-8 text-center text-gray-500">Cargando pedidos...</div>
+                ) : error ? (
+                    <div className="p-8 text-center text-red-600">{error}</div>
                 ) : (
                     <>
                         <div className="overflow-x-auto">
@@ -153,8 +250,8 @@ export default function DashboardApp() {
 
                             <div className="flex gap-2">
                                 <button
-                                    onClick={() => cambiarPaginaDesdeUrl(links.prev)}
-                                    disabled={!links.prev}
+                                    onClick={irPaginaAnterior}
+                                    disabled={!meta.current_page || meta.current_page <= 1}
                                     className="px-4 py-2 rounded-lg border bg-white text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     Anterior
@@ -165,8 +262,8 @@ export default function DashboardApp() {
                                 </span>
 
                                 <button
-                                    onClick={() => cambiarPaginaDesdeUrl(links.next)}
-                                    disabled={!links.next}
+                                    onClick={irPaginaSiguiente}
+                                    disabled={!meta.last_page || meta.current_page >= meta.last_page}
                                     className="px-4 py-2 rounded-lg border bg-white text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     Siguiente
