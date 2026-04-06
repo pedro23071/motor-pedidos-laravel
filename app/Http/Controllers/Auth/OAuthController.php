@@ -18,17 +18,28 @@ class OAuthController extends Controller
     {
         $githubUser = Socialite::driver('github')->user();
 
-        $user = User::updateOrCreate(
-            [
-                'provider' => 'github',
-                'provider_id' => $githubUser->getId(),
-            ],
-            [
-                'name' => $githubUser->getName() ?: $githubUser->getNickname(),
-                'email' => $githubUser->getEmail(),
-                'avatar' => $githubUser->getAvatar(),
-            ]
-        );
+        // 1. Buscar por provider_id
+        $user = User::where('provider', 'github')
+            ->where('provider_id', $githubUser->getId())
+            ->first();
+
+        // 2. Si no existe, buscar por email
+        if (!$user) {
+            $user = User::where('email', $githubUser->getEmail())->first();
+        }
+
+        // 3. Si no existe, crear nuevo
+        if (!$user) {
+            $user = new User();
+        }
+
+        // 4. Actualizar datos
+        $user->name = $githubUser->getName() ?: $githubUser->getNickname();
+        $user->email = $githubUser->getEmail();
+        $user->provider = 'github';
+        $user->provider_id = $githubUser->getId();
+        $user->avatar = $githubUser->getAvatar();
+        $user->save();
 
         Auth::login($user);
 
